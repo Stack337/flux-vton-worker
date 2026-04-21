@@ -1,61 +1,47 @@
-"""
-Diagnostic handler — tests each import separately to find what crashes.
-"""
+"""Ultra-minimal handler — NO torch/onnx imports. Just test Python + runpod work."""
 import runpod
-import logging
+import os
 import sys
-import traceback
-
-logging.basicConfig(level=logging.INFO, stream=sys.stdout, format="%(asctime)s %(name)s %(message)s")
-log = logging.getLogger("diag")
-
-results = {}
-
-# Test 1: torch
-try:
-    import torch
-    results["torch"] = f"OK v{torch.__version__}, CUDA={torch.cuda.is_available()}"
-    if torch.cuda.is_available():
-        results["gpu"] = torch.cuda.get_device_name(0)
-except Exception as e:
-    results["torch"] = f"FAIL: {e}"
-
-# Test 2: onnxruntime
-try:
-    import onnxruntime as ort
-    results["onnxruntime"] = f"OK v{ort.__version__}, providers={ort.get_available_providers()}"
-except Exception as e:
-    results["onnxruntime"] = f"FAIL: {e}"
-
-# Test 3: fashn_vton import
-try:
-    from fashn_vton import TryOnPipeline
-    results["fashn_vton"] = "OK"
-except Exception as e:
-    results["fashn_vton"] = f"FAIL: {traceback.format_exc()}"
-
-# Test 4: fashn_human_parser
-try:
-    from fashn_human_parser import FashnHumanParser
-    results["fashn_human_parser"] = "OK"
-except Exception as e:
-    results["fashn_human_parser"] = f"FAIL: {e}"
-
-# Test 5: disk
-try:
-    import shutil
-    total, used, free = shutil.disk_usage("/")
-    results["disk"] = f"{free/1e9:.1f}GB free / {total/1e9:.1f}GB total"
-except Exception as e:
-    results["disk"] = f"FAIL: {e}"
-
-for k, v in results.items():
-    log.info(f"{k}: {v}")
-
+import subprocess
 
 def handler(job):
-    return results
+    info = {
+        "python": sys.version,
+        "platform": sys.platform,
+        "cwd": os.getcwd(),
+    }
+    
+    # Check disk
+    try:
+        import shutil
+        t, u, f = shutil.disk_usage("/")
+        info["disk"] = f"{f/1e9:.1f}GB free / {t/1e9:.1f}GB total"
+    except: pass
+    
+    # Check if CUDA libs exist
+    try:
+        r = subprocess.run(["ldconfig", "-p"], capture_output=True, text=True, timeout=5)
+        cuda_libs = [l.strip() for l in r.stdout.split("\n") if "cuda" in l.lower()][:5]
+        info["cuda_libs"] = cuda_libs
+    except: pass
+    
+    # Check nvidia-smi
+    try:
+        r = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"], 
+                          capture_output=True, text=True, timeout=5)
+        info["gpu"] = r.stdout.strip()
+    except Exception as e:
+        info["gpu"] = str(e)
+    
+    # Try importing torch (just version, don't init CUDA)
+    try:
+        import torch
+        info["torch"] = torch.__version__
+        info["torch_cuda"] = str(torch.cuda.is_available())
+    except Exception as e:
+        info["torch_error"] = str(e)
+    
+    return info
 
-
-log.info("Diagnostic handler ready")
+print("Ultra-minimal handler starting...", flush=True)
 runpod.serverless.start({"handler": handler})
