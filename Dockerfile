@@ -1,22 +1,22 @@
-FROM nvidia/cuda:12.1.1-runtime-ubuntu22.04
+FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1
 ENV DEBIAN_FRONTEND=noninteractive
-ENV HF_HOME=/app/hf_cache
 
 WORKDIR /app
 
-# Python 3.10 (default in Ubuntu 22.04) + deps
+# System deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-pip \
     libgl1 libglib2.0-0 git && \
-    ln -sf /usr/bin/python3 /usr/bin/python && \
     rm -rf /var/lib/apt/lists/*
 
-# PyTorch CUDA 12.1
+# PyTorch with CUDA 12.1 (bundles its own CUDA runtime)
 RUN pip install --no-cache-dir \
     torch==2.2.2 torchvision==0.17.2 \
     --index-url https://download.pytorch.org/whl/cu121
+
+# Make torch's CUDA libs visible to onnxruntime-gpu
+ENV LD_LIBRARY_PATH=/usr/local/lib/python3.11/site-packages/torch/lib:/usr/local/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:/usr/local/lib/python3.11/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.11/site-packages/nvidia/cudnn/lib:${LD_LIBRARY_PATH}
 
 # fashn-vton + runpod
 RUN pip install --no-cache-dir \
