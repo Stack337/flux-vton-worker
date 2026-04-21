@@ -7,7 +7,7 @@ WORKDIR /app
 
 # System deps for opencv + git for pip install from github
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgl1-mesa-glx libglib2.0-0 git && \
+    libgl1 libglib2.0-0 git && \
     rm -rf /var/lib/apt/lists/*
 
 # PyTorch with CUDA 12.1 (pip wheel bundles CUDA runtime)
