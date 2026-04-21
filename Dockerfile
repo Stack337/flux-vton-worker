@@ -1,21 +1,24 @@
-FROM python:3.11-slim
+FROM nvidia/cuda:12.1.1-runtime-ubuntu22.04
 
 ENV PYTHONUNBUFFERED=1
 ENV DEBIAN_FRONTEND=noninteractive
+ENV HF_HOME=/app/hf_cache
 
 WORKDIR /app
 
-# System deps for opencv + git for pip install from github
+# Python 3.10 (default in Ubuntu 22.04) + deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-pip \
     libgl1 libglib2.0-0 git && \
+    ln -sf /usr/bin/python3 /usr/bin/python && \
     rm -rf /var/lib/apt/lists/*
 
-# PyTorch with CUDA 12.1 (pip wheel bundles CUDA runtime)
+# PyTorch CUDA 12.1
 RUN pip install --no-cache-dir \
     torch==2.2.2 torchvision==0.17.2 \
     --index-url https://download.pytorch.org/whl/cu121
 
-# fashn-vton + runpod SDK
+# fashn-vton + runpod
 RUN pip install --no-cache-dir \
     runpod \
     git+https://github.com/fashn-AI/fashn-vton-1.5.git
