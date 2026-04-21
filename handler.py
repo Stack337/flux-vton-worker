@@ -1,125 +1,138 @@
 """
-FASHN VTON RunPod Serverless Handler
-Downloads weights on cold start, runs inference on requests.
+RunPod Serverless Handler — FLUX Klein 9B Virtual Try-On LoRA
+Model: black-forest-labs/FLUX.2-Klein-9B + fal/flux-klein-9b-virtual-tryon-lora
 """
-import runpod
-import logging
-import sys
 import os
-import base64
-import io
-import time
-import traceback
-import shutil
+os.environ.pop("SSL_CERT_FILE", None)
 
-os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+import io
+import sys
+import time
+import base64
+import logging
+import traceback
 
 logging.basicConfig(level=logging.INFO, stream=sys.stdout,
                     format="%(filename)-20s:%(lineno)-4d %(asctime)s %(message)s")
-log = logging.getLogger("vton")
+log = logging.getLogger("flux-vton")
 
-WEIGHTS_DIR = os.environ.get("WEIGHTS_DIR", "/app/weights")
-pipeline = None
+import runpod
+
+pipe = None
 init_error = None
+
+LORA_REPO = "fal/flux-klein-9b-virtual-tryon-lora"
+LORA_FILE = "flux-klein-tryon.safetensors"
+BASE_MODEL = "black-forest-labs/FLUX.2-Klein-9B"
 
 
 def init():
-    """Download weights and initialize the TryOnPipeline."""
-    global pipeline, init_error
+    """Load FLUX Klein 9B + VTON LoRA at container startup."""
+    global pipe, init_error
     try:
-        log.info("=== INIT START ===")
-        
-        # Disk info
-        total, used, free = shutil.disk_usage("/")
-        log.info(f"Disk: {free/1e9:.1f}GB free / {total/1e9:.1f}GB total")
-        
-        # GPU info
         import torch
-        log.info(f"PyTorch {torch.__version__}, CUDA available: {torch.cuda.is_available()}")
+        log.info(f"PyTorch {torch.__version__}, CUDA: {torch.cuda.is_available()}")
         if torch.cuda.is_available():
             log.info(f"GPU: {torch.cuda.get_device_name(0)}")
             log.info(f"VRAM: {torch.cuda.get_device_properties(0).total_mem / 1e9:.1f}GB")
-        
-        # Download weights
-        os.makedirs(WEIGHTS_DIR, exist_ok=True)
-        from huggingface_hub import hf_hub_download
-        
-        log.info("Downloading TryOnModel weights...")
-        hf_hub_download(repo_id="fashn-ai/fashn-vton-1.5",
-                       filename="model.safetensors",
-                       local_dir=WEIGHTS_DIR)
-        
-        dwpose_dir = os.path.join(WEIGHTS_DIR, "dwpose")
-        os.makedirs(dwpose_dir, exist_ok=True)
-        for fn in ["yolox_l.onnx", "dw-ll_ucoco_384.onnx"]:
-            log.info(f"Downloading DWPose/{fn}...")
-            hf_hub_download(repo_id="fashn-ai/DWPose", filename=fn,
-                          local_dir=dwpose_dir)
-        
-        # Init human parser (downloads its own weights)
-        log.info("Initializing FashnHumanParser...")
-        from fashn_human_parser import FashnHumanParser
-        _ = FashnHumanParser(device="cpu")
-        
-        # Init pipeline
-        log.info("Loading TryOnPipeline...")
-        from fashn_vton import TryOnPipeline
-        pipeline = TryOnPipeline(weights_dir=WEIGHTS_DIR)
-        
-        total2, used2, free2 = shutil.disk_usage("/")
-        log.info(f"Disk after init: {free2/1e9:.1f}GB free")
+
+        from diffusers import FluxKontextPipeline
+
+        log.info(f"Loading base model: {BASE_MODEL}")
+        t0 = time.time()
+        pipe = FluxKontextPipeline.from_pretrained(
+            BASE_MODEL,
+            torch_dtype=torch.bfloat16,
+        ).to("cuda")
+        log.info(f"Base model loaded in {time.time()-t0:.1f}s")
+
+        log.info(f"Loading LoRA: {LORA_REPO}/{LORA_FILE}")
+        pipe.load_lora_weights(LORA_REPO, weight_name=LORA_FILE)
+
+        try:
+            pipe.transformer = torch.compile(pipe.transformer, mode="reduce-overhead")
+            log.info("torch.compile OK")
+        except Exception as e:
+            log.warning(f"torch.compile skipped: {e}")
+
         log.info("=== INIT DONE ===")
-        
-    except Exception as e:
+
+    except Exception:
         init_error = traceback.format_exc()
         log.error(f"INIT FAILED:\n{init_error}")
 
 
+def decode_image(data: str):
+    from PIL import Image
+    if data.startswith("data:"):
+        data = data.split(",", 1)[1]
+    return Image.open(io.BytesIO(base64.b64decode(data))).convert("RGB")
+
+
+def encode_image(img):
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+def build_prompt(category="tops"):
+    if category in ("tops", "top"):
+        return "TRYON person standing. Replace the outfit with the top garment shown in the reference image. The final image is a full body shot."
+    elif category in ("bottoms", "bottom"):
+        return "TRYON person standing. Replace the outfit with the bottom garment shown in the reference image. The final image is a full body shot."
+    else:
+        return "TRYON person standing. Replace the outfit with the clothing shown in the reference images. The final image is a full body shot."
+
+
 def handler(job):
-    """Process a virtual try-on request."""
-    global pipeline, init_error
-    
-    if pipeline is None:
-        return {"error": f"Pipeline not loaded. Init error:\n{init_error or 'unknown'}"}
-    
-    job_input = job.get("input", {})
-    
-    person_b64 = job_input.get("person_image")
-    garment_b64 = job_input.get("garment_image")
-    
+    global pipe, init_error
+
+    if pipe is None:
+        return {"error": f"Pipeline not loaded.\n{init_error or 'unknown'}"}
+
+    inp = job.get("input", job)
+
+    person_b64 = inp.get("person_image")
+    garment_b64 = inp.get("garment_image")
     if not person_b64 or not garment_b64:
         return {"error": "Missing person_image or garment_image (base64)"}
-    
+
     try:
-        from PIL import Image
-        
-        person_img = Image.open(io.BytesIO(base64.b64decode(person_b64))).convert("RGB")
-        garment_img = Image.open(io.BytesIO(base64.b64decode(garment_b64))).convert("RGB")
-        
-        log.info(f"Input: person={person_img.size}, garment={garment_img.size}")
+        category = inp.get("category", "tops")
+        num_steps = inp.get("num_steps", 4)
+        guidance_scale = inp.get("guidance_scale", 2.5)
+
+        person = decode_image(person_b64)
+        garment = decode_image(garment_b64)
+        prompt = build_prompt(category)
+
+        log.info(f"VTON: cat={category} steps={num_steps} person={person.size} garment={garment.size}")
         t0 = time.time()
-        
-        result = pipeline(
-            person_image=person_img,
-            garment_image=garment_img,
-            num_inference_steps=job_input.get("steps", 30),
-            guidance_scale=job_input.get("guidance_scale", 2.5),
-            seed=job_input.get("seed", 42),
+
+        result = pipe(
+            prompt=prompt,
+            image=person,
+            image_2=garment,
+            num_inference_steps=num_steps,
+            guidance_scale=guidance_scale,
+            height=1024,
+            width=768,
         )
-        
-        elapsed = time.time() - t0
-        log.info(f"Inference done in {elapsed:.1f}s")
-        
-        buf = io.BytesIO()
-        result.save(buf, format="PNG")
-        result_b64 = base64.b64encode(buf.getvalue()).decode()
-        
-        return {"image": result_b64, "time": round(elapsed, 1)}
-        
+
+        output_img = result.images[0]
+        elapsed = round(time.time() - t0, 1)
+        log.info(f"Done in {elapsed}s | {output_img.size}")
+
+        return {
+            "image_base64": encode_image(output_img),
+            "elapsed_sec": elapsed,
+            "resolution": f"{output_img.size[0]}x{output_img.size[1]}",
+        }
+
     except Exception as e:
-        log.error(f"Inference error: {traceback.format_exc()}")
+        log.error(f"Inference error:\n{traceback.format_exc()}")
         return {"error": str(e)}
 
 
-log.info("Starting VTON worker...")
+log.info("Starting FLUX Klein VTON worker...")
 runpod.serverless.start({"handler": handler, "init": init})
