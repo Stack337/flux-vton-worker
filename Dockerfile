@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM runpod/base:0.6.2-cuda12.2.0
 
 ENV PYTHONUNBUFFERED=1
 
