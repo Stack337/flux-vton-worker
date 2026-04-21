@@ -10,16 +10,20 @@ import io
 import time
 import traceback
 
+# Prevent HF double-caching (symlinks + original)
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+os.environ["HF_HOME"] = "/app/hf_cache"
+
 logging.basicConfig(level=logging.INFO, stream=sys.stdout, format="%(asctime)s %(name)s %(message)s")
 log = logging.getLogger("vton")
 
-WEIGHTS_DIR = os.environ.get("WEIGHTS_DIR", "/app/weights")
+WEIGHTS_DIR = "/app/weights"
 pipeline = None
 init_error = None
 
 
 def download_weights():
-    """Download model weights from HuggingFace (idempotent)."""
+    """Download model weights from HuggingFace."""
     from huggingface_hub import hf_hub_download
 
     os.makedirs(WEIGHTS_DIR, exist_ok=True)
@@ -28,22 +32,38 @@ def download_weights():
 
     tryon_path = os.path.join(WEIGHTS_DIR, "model.safetensors")
     if not os.path.exists(tryon_path):
-        log.info("Downloading TryOnModel weights...")
-        hf_hub_download(repo_id="fashn-ai/fashn-vton-1.5", filename="model.safetensors", local_dir=WEIGHTS_DIR)
+        log.info("Downloading TryOnModel weights (~2.4 GB)...")
+        hf_hub_download(
+            repo_id="fashn-ai/fashn-vton-1.5",
+            filename="model.safetensors",
+            local_dir=WEIGHTS_DIR,
+            local_dir_use_symlinks=False,
+        )
+        log.info(f"TryOnModel saved: {os.path.getsize(tryon_path) / 1e9:.2f} GB")
     else:
-        log.info("TryOnModel weights cached")
+        log.info("TryOnModel cached")
 
     for fname in ["yolox_l.onnx", "dw-ll_ucoco_384.onnx"]:
         fpath = os.path.join(dwpose_dir, fname)
         if not os.path.exists(fpath):
             log.info(f"Downloading DWPose/{fname}...")
-            hf_hub_download(repo_id="fashn-ai/DWPose", filename=fname, local_dir=dwpose_dir)
+            hf_hub_download(
+                repo_id="fashn-ai/DWPose",
+                filename=fname,
+                local_dir=dwpose_dir,
+                local_dir_use_symlinks=False,
+            )
         else:
             log.info(f"DWPose/{fname} cached")
 
-    log.info("Ensuring FashnHumanParser weights...")
+    log.info("Downloading FashnHumanParser weights...")
     from fashn_human_parser import FashnHumanParser
     _ = FashnHumanParser(device="cpu")
+
+    # Log disk usage
+    import shutil
+    total, used, free = shutil.disk_usage("/")
+    log.info(f"Disk: {used/1e9:.1f}GB used / {total/1e9:.1f}GB total / {free/1e9:.1f}GB free")
     log.info("All weights ready")
 
 
@@ -52,7 +72,9 @@ def init():
     global pipeline, init_error
     try:
         import torch
+        log.info(f"=== VTON Worker Init ===")
         log.info(f"Python {sys.version}")
+        log.info(f"PyTorch {torch.__version__}")
         log.info(f"CUDA available: {torch.cuda.is_available()}")
         if torch.cuda.is_available():
             log.info(f"GPU: {torch.cuda.get_device_name(0)}")
@@ -67,15 +89,16 @@ def init():
         from fashn_vton import TryOnPipeline
         pipeline = TryOnPipeline(weights_dir=WEIGHTS_DIR)
         log.info(f"Pipeline loaded in {time.time() - t1:.1f}s")
+        log.info("=== Init complete ===")
     except Exception as e:
         init_error = traceback.format_exc()
-        log.error(f"INIT FAILED: {init_error}")
+        log.error(f"=== INIT FAILED ===\n{init_error}")
 
 
 def handler(job):
     """Process a virtual try-on request."""
     if pipeline is None:
-        return {"error": f"Pipeline not initialized. Init error: {init_error}"}
+        return {"error": f"Pipeline not initialized", "init_error": init_error}
 
     from PIL import Image
     inp = job.get("input", {})
@@ -85,7 +108,7 @@ def handler(job):
     category = inp.get("category", "tops")
 
     if not person_b64 or not garment_b64:
-        return {"error": "person_image and garment_image (base64) are required"}
+        return {"error": "person_image and garment_image (base64) required"}
     if category not in ("tops", "bottoms", "one-pieces"):
         return {"error": f"Invalid category '{category}'"}
 
@@ -93,7 +116,7 @@ def handler(job):
         person_img = Image.open(io.BytesIO(base64.b64decode(person_b64))).convert("RGB")
         garment_img = Image.open(io.BytesIO(base64.b64decode(garment_b64))).convert("RGB")
     except Exception as e:
-        return {"error": f"Failed to decode images: {e}"}
+        return {"error": f"Image decode failed: {e}"}
 
     t0 = time.time()
     result = pipeline(
@@ -107,16 +130,16 @@ def handler(job):
         seed=inp.get("seed", 42),
         segmentation_free=inp.get("segmentation_free", True),
     )
-    inference_time = time.time() - t0
-    log.info(f"Inference: {inference_time:.2f}s")
+    elapsed = time.time() - t0
+    log.info(f"Inference: {elapsed:.2f}s")
 
-    output_images = []
+    images_b64 = []
     for img in result.images:
         buf = io.BytesIO()
         img.save(buf, format="PNG")
-        output_images.append(base64.b64encode(buf.getvalue()).decode("ascii"))
+        images_b64.append(base64.b64encode(buf.getvalue()).decode("ascii"))
 
-    return {"images": output_images, "count": len(output_images), "inference_time_s": round(inference_time, 2)}
+    return {"images": images_b64, "count": len(images_b64), "inference_time_s": round(elapsed, 2)}
 
 
 log.info("Starting VTON worker...")
