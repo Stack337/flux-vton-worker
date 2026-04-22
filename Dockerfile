@@ -29,6 +29,9 @@ RUN pip install --no-cache-dir \
     pillow \
     runpod
 
+# v3: module-level init, requests dep
+RUN pip install --no-cache-dir requests
+
 COPY handler.py /app/handler.py
 
 CMD ["python", "-u", "/app/handler.py"]
