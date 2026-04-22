@@ -160,7 +160,7 @@ def handler(job):
         return {"error": "Missing top_image or garment_image (base64 or URL)"}
 
     try:
-        num_steps = int(inp.get("num_steps", 28))
+        num_steps = int(inp.get("num_steps", 4))  # Klein 9B is step-distilled to 4
         guidance_scale = float(inp.get("guidance_scale", 2.5))
         lora_scale = float(inp.get("lora_scale", 1.0))
         width = int(inp.get("width", 768))
