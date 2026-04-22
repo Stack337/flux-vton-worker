@@ -29,7 +29,7 @@ RUN pip install --no-cache-dir \
     pillow \
     runpod
 
-# v3: module-level init, requests dep
+# v4: total_memory fix
 RUN pip install --no-cache-dir requests
 
 COPY handler.py /app/handler.py
