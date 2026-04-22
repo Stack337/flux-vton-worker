@@ -20,74 +20,71 @@ log = logging.getLogger("flux-vton")
 
 import runpod
 
-pipe = None
-init_error = None
-
+# ─── Model config ───────────────────────────────────────────
 LORA_REPO = "fal/flux-klein-9b-virtual-tryon-lora"
 LORA_FILE = "flux-klein-tryon.safetensors"
 BASE_MODEL = "black-forest-labs/FLUX.2-Klein-9B"
 
+# ─── Module-level initialization (RunPod best practice) ─────
+pipe = None
+init_error = None
 
-def init():
-    """Load FLUX Klein 9B + VTON LoRA at container startup."""
-    global pipe, init_error
+try:
+    import torch
+    log.info(f"PyTorch {torch.__version__}, CUDA: {torch.cuda.is_available()}")
+    if torch.cuda.is_available():
+        log.info(f"GPU: {torch.cuda.get_device_name(0)}")
+        log.info(f"VRAM: {torch.cuda.get_device_properties(0).total_mem / 1e9:.1f}GB")
+
+    # Try pipeline classes in priority order
+    pipeline_cls = None
     try:
-        import torch
-        log.info(f"PyTorch {torch.__version__}, CUDA: {torch.cuda.is_available()}")
-        if torch.cuda.is_available():
-            log.info(f"GPU: {torch.cuda.get_device_name(0)}")
-            log.info(f"VRAM: {torch.cuda.get_device_properties(0).total_mem / 1e9:.1f}GB")
-
-        # Try Flux2KleinPipeline first (latest diffusers from main)
-        # Fall back to FluxPipeline if not available
-        pipeline_cls = None
+        from diffusers import Flux2KleinPipeline
+        pipeline_cls = Flux2KleinPipeline
+        log.info("Using Flux2KleinPipeline")
+    except ImportError:
+        log.warning("Flux2KleinPipeline not found, trying FluxPipeline")
         try:
-            from diffusers import Flux2KleinPipeline
-            pipeline_cls = Flux2KleinPipeline
-            log.info("Using Flux2KleinPipeline")
+            from diffusers import FluxPipeline
+            pipeline_cls = FluxPipeline
+            log.info("Using FluxPipeline as fallback")
         except ImportError:
-            log.warning("Flux2KleinPipeline not found, trying FluxPipeline")
-            try:
-                from diffusers import FluxPipeline
-                pipeline_cls = FluxPipeline
-                log.info("Using FluxPipeline as fallback")
-            except ImportError:
-                log.warning("FluxPipeline not found, trying AutoPipelineForImage2Image")
-                from diffusers import AutoPipelineForImage2Image
-                pipeline_cls = AutoPipelineForImage2Image
-                log.info("Using AutoPipelineForImage2Image as fallback")
+            log.warning("FluxPipeline not found either")
+            from diffusers import AutoPipelineForImage2Image
+            pipeline_cls = AutoPipelineForImage2Image
+            log.info("Using AutoPipelineForImage2Image as fallback")
 
-        log.info(f"Loading base model: {BASE_MODEL}")
-        t0 = time.time()
+    hf_token = os.environ.get("HF_TOKEN")
+    if hf_token:
+        log.info("HF_TOKEN found, using for gated model access")
 
-        # Check HF token
-        hf_token = os.environ.get("HF_TOKEN")
-        if hf_token:
-            log.info("HF_TOKEN found, using for gated model access")
+    log.info(f"Loading base model: {BASE_MODEL}")
+    t0 = time.time()
+    pipe = pipeline_cls.from_pretrained(
+        BASE_MODEL,
+        torch_dtype=torch.bfloat16,
+        token=hf_token,
+    ).to("cuda")
+    log.info(f"Base model loaded in {time.time()-t0:.1f}s")
 
-        pipe = pipeline_cls.from_pretrained(
-            BASE_MODEL,
-            torch_dtype=torch.bfloat16,
-            token=hf_token,
-        ).to("cuda")
-        log.info(f"Base model loaded in {time.time()-t0:.1f}s")
+    log.info(f"Loading LoRA: {LORA_REPO}/{LORA_FILE}")
+    pipe.load_lora_weights(LORA_REPO, weight_name=LORA_FILE)
+    log.info("LoRA loaded OK")
 
-        log.info(f"Loading LoRA: {LORA_REPO}/{LORA_FILE}")
-        pipe.load_lora_weights(LORA_REPO, weight_name=LORA_FILE)
-        log.info("LoRA loaded OK")
+    try:
+        pipe.transformer = torch.compile(pipe.transformer, mode="reduce-overhead")
+        log.info("torch.compile OK")
+    except Exception as e:
+        log.warning(f"torch.compile skipped: {e}")
 
-        try:
-            pipe.transformer = torch.compile(pipe.transformer, mode="reduce-overhead")
-            log.info("torch.compile OK")
-        except Exception as e:
-            log.warning(f"torch.compile skipped: {e}")
+    log.info("=== INIT DONE ===")
 
-        log.info("=== INIT DONE ===")
+except Exception:
+    init_error = traceback.format_exc()
+    log.error(f"INIT FAILED:\n{init_error}")
 
-    except Exception:
-        init_error = traceback.format_exc()
-        log.error(f"INIT FAILED:\n{init_error}")
 
+# ─── Helper functions ───────────────────────────────────────
 
 def load_image(data: str):
     """Load image from base64 string or URL."""
@@ -118,7 +115,6 @@ def build_prompt(inp):
     """Build TRYON prompt from input parameters or use custom prompt."""
     custom = inp.get("prompt")
     if custom:
-        # Ensure TRYON trigger word is at the start
         if not custom.strip().upper().startswith("TRYON"):
             custom = "TRYON " + custom
         return custom
@@ -136,9 +132,9 @@ def build_prompt(inp):
         return f"TRYON {person_desc}. Replace the outfit with {top_desc} and {bottom_desc} as shown in the reference images. The final image is a full body shot."
 
 
-def handler(job):
-    global pipe, init_error
+# ─── Handler ────────────────────────────────────────────────
 
+def handler(job):
     if pipe is None:
         return {"error": f"Pipeline not loaded.\n{init_error or 'unknown'}"}
 
@@ -146,7 +142,7 @@ def handler(job):
 
     # Support both base64 and URL inputs
     person_data = inp.get("person_image")
-    garment_data = inp.get("garment_image")  # Single garment (backwards compat)
+    garment_data = inp.get("garment_image")  # backwards compat
     top_data = inp.get("top_image") or garment_data
     bottom_data = inp.get("bottom_image")
 
@@ -168,7 +164,6 @@ def handler(job):
 
         prompt = build_prompt(inp)
 
-        # Build image list: person, top, [bottom]
         images = [person, top]
         if bottom:
             images.append(bottom)
@@ -180,21 +175,18 @@ def handler(job):
 
         t0 = time.time()
 
-        # The pipeline accepts multiple reference images
-        # Try the Klein-specific API first, fall back to generic
         try:
             result = pipe(
                 prompt=prompt,
-                image=images[0],         # person
-                image_2=images[1],        # top garment
-                image_3=images[2] if len(images) > 2 else None,  # bottom garment
+                image=images[0],
+                image_2=images[1],
+                image_3=images[2] if len(images) > 2 else None,
                 num_inference_steps=num_steps,
                 guidance_scale=guidance_scale,
                 height=height,
                 width=width,
             )
         except TypeError:
-            # Fallback: some pipeline versions use different argument names
             log.warning("Trying alternative pipeline API...")
             result = pipe(
                 prompt=prompt,
@@ -220,5 +212,6 @@ def handler(job):
         return {"error": str(e)}
 
 
+# ─── Start RunPod worker ────────────────────────────────────
 log.info("Starting FLUX Klein VTON worker...")
-runpod.serverless.start({"handler": handler, "init": init})
+runpod.serverless.start({"handler": handler})
