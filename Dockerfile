@@ -11,9 +11,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 libglib2.0-0 git && \
     rm -rf /var/lib/apt/lists/*
 
-# PyTorch 2.2.2 + CUDA 12.1 (supports RTX 3090/4090)
+# PyTorch 2.5.1 + CUDA 12.1 (supports RTX 3090/4090, includes torch.xpu)
 RUN pip install --no-cache-dir \
-    torch==2.2.2 torchvision==0.17.2 \
+    torch==2.5.1 torchvision==0.20.1 \
     --index-url https://download.pytorch.org/whl/cu121
 
 # diffusers from main branch (required for Flux2KleinPipeline)
