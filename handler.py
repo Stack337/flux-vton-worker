@@ -34,7 +34,7 @@ try:
     log.info(f"PyTorch {torch.__version__}, CUDA: {torch.cuda.is_available()}")
     if torch.cuda.is_available():
         log.info(f"GPU: {torch.cuda.get_device_name(0)}")
-        log.info(f"VRAM: {torch.cuda.get_device_properties(0).total_mem / 1e9:.1f}GB")
+        log.info(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f}GB")
 
     # Try pipeline classes in priority order
     pipeline_cls = None
