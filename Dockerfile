@@ -6,7 +6,7 @@ ENV HF_HOME=/app/hf_cache
 
 WORKDIR /app
 
-# System deps for PIL/OpenCV
+# System deps for PIL/OpenCV + git for pip
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 libglib2.0-0 git && \
     rm -rf /var/lib/apt/lists/*
@@ -17,6 +17,7 @@ RUN pip install --no-cache-dir \
     --index-url https://download.pytorch.org/whl/cu121
 
 # diffusers from main branch (required for Flux2KleinPipeline)
+# requests for URL image loading
 RUN pip install --no-cache-dir \
     "numpy<2" \
     git+https://github.com/huggingface/diffusers.git \
@@ -27,10 +28,8 @@ RUN pip install --no-cache-dir \
     protobuf \
     huggingface_hub \
     pillow \
+    requests \
     runpod
-
-# v4: total_memory fix
-RUN pip install --no-cache-dir requests
 
 COPY handler.py /app/handler.py
 
