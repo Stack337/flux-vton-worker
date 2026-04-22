@@ -31,7 +31,7 @@ RUN pip install --no-cache-dir \
     requests \
     runpod
 
-ARG CACHE_BUST=1
+ARG CACHE_BUST=2
 COPY handler.py /app/handler.py
 
 CMD ["python", "-u", "/app/handler.py"]
