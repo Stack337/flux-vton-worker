@@ -56,7 +56,10 @@ try:
 
     hf_token = os.environ.get("HF_TOKEN")
     if hf_token:
-        log.info("HF_TOKEN found, using for gated model access")
+        log.info("HF_TOKEN found, logging in to HuggingFace Hub")
+        from huggingface_hub import login
+        login(token=hf_token, add_to_git_credential=False)
+        log.info("HF login OK")
 
     log.info(f"Loading base model: {BASE_MODEL}")
     t0 = time.time()
