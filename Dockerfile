@@ -3,6 +3,7 @@ FROM python:3.11-slim
 ENV PYTHONUNBUFFERED=1
 ENV DEBIAN_FRONTEND=noninteractive
 ENV HF_HOME=/app/hf_cache
+ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 WORKDIR /app
 
@@ -11,10 +12,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 libglib2.0-0 git && \
     rm -rf /var/lib/apt/lists/*
 
-# PyTorch 2.5.1 + CUDA 12.1 (supports RTX 3090/4090, includes torch.xpu)
+# PyTorch 2.7+ with CUDA 12.6 — supports Ada, Hopper AND Blackwell GPUs
 RUN pip install --no-cache-dir \
-    torch==2.5.1 torchvision==0.20.1 \
-    --index-url https://download.pytorch.org/whl/cu121
+    torch torchvision \
+    --index-url https://download.pytorch.org/whl/cu126
 
 # diffusers from main branch (required for Flux2KleinPipeline)
 # requests for URL image loading
@@ -31,7 +32,7 @@ RUN pip install --no-cache-dir \
     requests \
     runpod
 
-ARG CACHE_BUST=3
+ARG CACHE_BUST=4
 COPY handler.py /app/handler.py
 
 CMD ["python", "-u", "/app/handler.py"]
