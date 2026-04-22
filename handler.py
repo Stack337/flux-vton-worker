@@ -64,19 +64,24 @@ try:
         BASE_MODEL,
         torch_dtype=torch.bfloat16,
         token=hf_token,
-    ).to("cuda")
+    )
+
+    # Use CPU offload to fit 9B model on 24GB GPU
+    # This keeps model parts on CPU and moves them to GPU only during inference
+    vram_gb = torch.cuda.get_device_properties(0).total_memory / 1e9 if torch.cuda.is_available() else 0
+    if vram_gb < 30:
+        log.info(f"VRAM {vram_gb:.1f}GB < 30GB, using enable_model_cpu_offload()")
+        pipe.enable_model_cpu_offload()
+    else:
+        log.info(f"VRAM {vram_gb:.1f}GB >= 30GB, loading full model to GPU")
+        pipe.to("cuda")
     log.info(f"Base model loaded in {time.time()-t0:.1f}s")
 
     log.info(f"Loading LoRA: {LORA_REPO}/{LORA_FILE}")
     pipe.load_lora_weights(LORA_REPO, weight_name=LORA_FILE)
     log.info("LoRA loaded OK")
 
-    try:
-        pipe.transformer = torch.compile(pipe.transformer, mode="reduce-overhead")
-        log.info("torch.compile OK")
-    except Exception as e:
-        log.warning(f"torch.compile skipped: {e}")
-
+    # Skip torch.compile to save VRAM on 24GB GPUs
     log.info("=== INIT DONE ===")
 
 except Exception:
